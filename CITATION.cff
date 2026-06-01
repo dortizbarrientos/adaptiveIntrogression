@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use this pipeline, please cite both the software and the associated study."
+title: "GA2OX8 adaptive-introgression modelling pipeline"
+authors:
+  - family-names: Ortiz-Barrientos
+    given-names: Daniel
+type: software
+license: MIT
+repository-code: "https://github.com/USERNAME/populus_pipeline"  # <-- set after creating the repo
+keywords:
+  - adaptive introgression
+  - population genetics
+  - quantitative genetics
+  - SLiM
+  - climate adaptation
+references:
+  - type: article
+    title: "Adaptive introgression preadapts forest trees to rapid climate change"
+    authors:
+      - family-names: Sang
+        given-names: Yupeng
+      - family-names: Wang
+        given-names: Jing
+    notes: "Main study (Science). Update with full author list, year, volume, and DOI on acceptance."

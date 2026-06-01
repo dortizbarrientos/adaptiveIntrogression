@@ -1,0 +1,4 @@
+replicate	lineage	fitness_end	phenotype_end	optimum_end	fitness_lag
+pl_sweep	pdav-N	0.00154291	0.018765	6.26875	6.24998
+pl_sweep	mixed	0.44986	0.000776317	4.77027	4.76949
+pl_sweep	rot	0.499945	0.000303969	3.63016	3.62986

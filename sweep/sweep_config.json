@@ -1,0 +1,27 @@
+{
+  "axes": {
+    "pl_mult_values": [
+      0.5,
+      1.0,
+      2.0
+    ],
+    "mig_values": [
+      1e-06,
+      1e-05,
+      0.0001
+    ]
+  },
+  "fixed": {
+    "mutEffect": 0.05,
+    "C": 50,
+    "gen_time": 15,
+    "ne_scale": 1.0
+  },
+  "n_reps": 10,
+  "base_seed": 22222222222222,
+  "cells": 9,
+  "total_runs": 180,
+  "parallel": 10,
+  "trajectory_file": "04_futureClimate/output/pl_sensitivity/populus_env_gentime15.txt",
+  "start_time": "2026-05-30 21:47:28"
+}

@@ -1,0 +1,26 @@
+# =============================================================================
+# requirements.txt  --  Python dependencies for the adaptiveIntrogression project
+#
+# Grouped by certainty. Run `./setup_python_env.sh --scan` to cross-check this
+# list against the imports actually present in your .py files, then prune or add.
+# Versions are left UNPINNED here so the install succeeds on new interpreters
+# (e.g. homebrew Python 3.14, where some packages may not yet ship wheels).
+# Once the env builds cleanly, the setup script writes requirements.lock.txt
+# with exact versions -- THAT is the file to reuse for reproducible runs.
+# =============================================================================
+
+# ---- CERTAIN: used by the analysis pipeline shipped with this project --------
+# aggregate_pl_sensitivity.py  -> pandas
+# plot_pl_sensitivity.py        -> numpy, pandas, matplotlib
+numpy
+pandas
+matplotlib
+
+# ---- LIKELY for SLiM / tree-sequence work (CONFIRM with --scan) --------------
+# These are common in popgen pipelines that post-process SLiM tree sequences.
+# If your driver writes TSVs directly and never touches tree sequences in
+# Python, you can delete this whole block. The setup script will tell you
+# which of these you actually import.
+tskit
+pyslim
+msprime

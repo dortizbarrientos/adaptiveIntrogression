@@ -1,0 +1,52 @@
+{
+  "bioclim": "bio10",
+  "ssp": "585",
+  "gen_time_years": 5.0,
+  "burn_in_generations": 1000,
+  "units": "deviation",
+  "baselines_subtracted": [
+    19.202083269583337,
+    16.018018078567568,
+    16.061904816380952
+  ],
+  "year_anchors": {
+    "present": 2020,
+    "2070": 2070,
+    "2090": 2090
+  },
+  "lineage_order": [
+    "pdav-N",
+    "mixed",
+    "rot"
+  ],
+  "lineage_anchors": [
+    {
+      "lineage": "pdav-N",
+      "n_populations": 24,
+      "present": 19.202083269583333,
+      "y2070": 23.945833365122482,
+      "y2090": 25.47083343399895,
+      "delta_2090": 6.268750164415618
+    },
+    {
+      "lineage": "mixed",
+      "n_populations": 37,
+      "present": 16.018018078567568,
+      "y2070": 19.422522484719217,
+      "y2090": 20.788288245329976,
+      "delta_2090": 4.770270166762408
+    },
+    {
+      "lineage": "rot",
+      "n_populations": 21,
+      "present": 16.061904816380956,
+      "y2070": 18.539682509407168,
+      "y2090": 19.6920634678432,
+      "delta_2090": 3.6301586514622457
+    }
+  ],
+  "matrix_shape": [
+    3,
+    1015
+  ]
+}

@@ -1,0 +1,24 @@
+# --- Python ---
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# --- editor / OS cruft ---
+*.bak
+*.bak2
+*~
+~$*
+.DS_Store
+
+# --- raw simulation output (deposited on Zenodo, not git) ---
+output/
+*.trees
+
+# --- packaging / archives ---
+*.tar.gz
+*.zip
+
+# --- build_clean_repo working reports (not part of the repo) ---
+_DEDUP_CONFLICTS.txt
+_OVERSIZE_FOR_ZENODO.txt

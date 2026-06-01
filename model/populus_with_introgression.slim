@@ -1,0 +1,474 @@
+// =============================================================================
+//  populus_with_introgression.slim
+//
+//  Polygenic fitness model for the Populus three-lineage system under a
+//  CMIP6-driven climate trajectory. Mirrors the architecture of Zhang et al.
+//  (2025, Nature Climate Change) and the Fulvetta repository
+//  (github.com/willright28/Project-for-three-Fulvetta-species), adapted for
+//  the Populus geometry: P. rotundifolia (source) -> admixed bridge ->
+//  northern P. davidiana (recipient).
+//
+//  This is the "with introgression" run: migration rates between source,
+//  bridge, and recipient are honoured throughout. A separate script,
+//  populus_without_introgression.slim, sets migration INTO the recipient to
+//  zero at the start of warming. The two are byte-identical apart from that
+//  one block, so any difference between their outputs is attributable to
+//  introgression and nothing else.
+//
+//  The trait model in plain terms: each individual carries a number of
+//  unlinked climate-adaptive loci. Each locus has an additive effect on a
+//  quantitative trait z (climate tolerance). Selection is Gaussian and
+//  stabilising toward a per-population per-generation optimum theta(t), read
+//  from a tab-separated environment file (the output of
+//  build_climate_trajectory.py). Each lineage tracks its own local optimum.
+//
+//  Parameters are passed via -d flags on the command line. Defaults are
+//  embedded but overridable for sensitivity sweeps. See the driver script
+//  run_populus_slim.sh for typical invocations.
+// =============================================================================
+
+initialize() {
+    // -------------------------------------------------------------------------
+    //  Constants and parameters
+    // -------------------------------------------------------------------------
+    //
+    //  These are designed to be passable from the command line via -d, so the
+    //  same script can serve as the default run AND as the engine for a
+    //  sensitivity sweep. Where -d isn't set, sensible defaults take over.
+
+    // Identifier for this run (used for output filenames). Override via -d run="my_run".
+    if (!exists("run"))         defineConstant("run", "default");
+
+    // Path to the working directory where output files are written.
+    if (!exists("wkdir"))       defineConstant("wkdir", ".");
+
+    // Path to the migration matrix (Ne on diagonal, migration rates off-diagonal).
+    if (!exists("migMatrix"))   defineConstant("migMatrix", "mig.txt");
+
+    // Path to the per-generation climate trajectory (3 rows = lineages,
+    // N columns = generations). Built by build_climate_trajectory.py.
+    if (!exists("Environment")) defineConstant("Environment", "populus_env.txt");
+
+    // Number of climate-adaptive loci (unlinked). The trait is the sum of
+    // their effects. Sensitivity range: 20 to 200.
+    if (!exists("C"))           defineConstant("C", 50);
+
+    // Number of neutral unlinked sites (for diagnostic purposes; not under
+    // selection). The Fulvetta model keeps this at 1; we do the same.
+    if (!exists("N_neutral"))   defineConstant("N_neutral", 1);
+
+    // Standard deviation of mutation effect size at climate-adaptive loci.
+    // Effects are drawn from N(0, mutEffect). For Populus we use a modest
+    // default; tune via sensitivity sweep.
+    if (!exists("mutEffect"))   defineConstant("mutEffect", 0.05);
+
+    // Mutation rate per site per generation. Populus literature gives
+    // 2.5e-9 to 7e-9; we default to the middle of that range.
+    if (!exists("mu"))          defineConstant("mu", 5e-9);
+
+    // Width of the Gaussian fitness function (the "tolerance" parameter).
+    // Larger pl = weaker selection.
+    //
+    // *** Lineage-specific values, grounded in real Populus data. ***
+    // These come from the within-lineage SD of present-day BIO10 across
+    // populations in the now_env.csv dataset, computed with:
+    //   m.groupby('group2')['bio10'].std()
+    //
+    // Lineage     n_populations   SD(BIO10 deg C)
+    //   pdav-N    24              1.61
+    //   mixed     37              3.77
+    //   rot       21              3.08
+    //
+    // The vector order MUST match the subpopulation order (pdav-N=0,
+    // mixed=1, rot=2). Each lineage's selection callback uses its own
+    // pl value, so the buffering result reflects real differences in
+    // thermal niche breadth between lineages, not a homogenised average.
+    //
+    // *** Optional sensitivity multiplier: pl_mult ***
+    // Defaults to 1.0, so the baseline pl_vec matches the empirical SDs.
+    // Pass `-d pl_mult=0.5` to tighten selection (selection 2x stronger,
+    // proportionally for all three lineages), or `-d pl_mult=2.0` to
+    // loosen it. This preserves the lineage-asymmetry while sweeping
+    // the overall strength of stabilising selection.
+    if (!exists("pl_mult"))     defineConstant("pl_mult", 1.0);
+    if (!exists("pl_vec_raw"))  defineConstant("pl_vec_raw", c(1.61, 3.77, 3.08));
+    if (!exists("pl_vec"))      defineConstant("pl_vec", pl_mult * pl_vec_raw);
+
+    // SD of non-heritable environmental noise on the phenotype. A modest
+    // value relative to mutEffect; tuneable.
+    if (!exists("esd"))         defineConstant("esd", 0.1);
+
+    // Population scaling factor. SLiM convention is to scale Ne down by some
+    // factor to make simulations tractable; 1 means use Ne directly from
+    // mig.txt. The Fulvetta script uses popscale = 1 in production runs.
+    if (!exists("popscale"))    defineConstant("popscale", 1);
+
+    // Threshold of mean fitness below which a population is marked extinct.
+    // The Fulvetta model uses 0.01.
+    if (!exists("extinctionLimit")) defineConstant("extinctionLimit", 0.01);
+
+    // Generation at which the warming phase begins (matches the burn-in
+    // length passed to build_climate_trajectory.py). For our default
+    // trajectory, burn-in is 1000 generations.
+    if (!exists("warming_start")) defineConstant("warming_start", 1000);
+
+    // Expected magnitude of trajectory values during burn-in. Used in a
+    // sanity check that flags accidental absolute-units trajectories.
+    // Deviation-units trajectories should sit near 0 during burn-in; a
+    // value above this threshold likely means the trajectory file was
+    // written with --units absolute by mistake.
+    if (!exists("units_check_threshold")) defineConstant("units_check_threshold", 5.0);
+
+    // -------------------------------------------------------------------------
+    //  Derived quantities and fitness-function normalisation
+    // -------------------------------------------------------------------------
+    //
+    //  fitcushion is a small minimum fitness to prevent populations from
+    //  getting locked into zero (matches Fulvetta's convention). The peak
+    //  fitness normaliser (maxfit) is now computed per-lineage inside the
+    //  callback-registration loop, since each lineage has its own pl.
+    defineConstant("fitcushion", 0.001);
+
+    initializeSLiMOptions(preventIncidentalSelfing=T);
+    initializeMutationRate(mu);
+
+    // -------------------------------------------------------------------------
+    //  Mutation types
+    // -------------------------------------------------------------------------
+    //
+    //  m1: neutral mutations (used at the N_neutral diagnostic site)
+    //  m2: climate-adaptive mutations (effects drawn from N(0, mutEffect))
+    //
+    //  m2 effects are 0.5 dominance (additive on the trait scale).
+    //  mutationStackPolicy="s" means a new mutation at an already-mutated site
+    //  STACKS (its effect adds) rather than replacing. This matters because
+    //  we treat each site as a potential QTL where multiple alleles can
+    //  contribute independently to the trait. m2.convertToSubstitution=F
+    //  keeps the mutation around as a polymorphism for tracking even after
+    //  fixation.
+    initializeMutationType("m1", 0.5, "f", 0.0);
+    initializeMutationType("m2", 0.5, "n", 0.0, mutEffect);
+    m2.mutationStackPolicy = "s";
+    m2.convertToSubstitution = F;
+
+    // -------------------------------------------------------------------------
+    //  Genomic element layout
+    // -------------------------------------------------------------------------
+    //
+    //  Sites 0 .. C-1 are climate-adaptive (g2). Sites C .. C + N_neutral - 1
+    //  are neutral (g1). All sites are free-recombining (r = 0.5 between any
+    //  pair); the trait architecture is therefore polygenic and unlinked,
+    //  matching the Fulvetta model and Yair & Coop's stabilising-selection
+    //  framework.
+    initializeGenomicElementType("g1", m1, 1.0);
+    initializeGenomicElementType("g2", m2, 1.0);
+    initializeGenomicElement(g2, 0, C - 1);
+    initializeGenomicElement(g1, C, C + N_neutral - 1);
+    initializeRecombinationRate(0.5);
+}
+
+// =============================================================================
+//  Generation 1: read migration matrix and create subpopulations
+// =============================================================================
+
+1 early() {
+    migrations = readFile(migMatrix);
+    defineConstant("npops", size(migrations));
+
+    // Diagonal entries are Ne; off-diagonal are migration rates.
+    popsizes = NULL;
+    for (p in 0:(npops - 1)) {
+        ms = strsplit(migrations[p], sep="\t");
+        popsizes = c(popsizes, asInteger(ms[p]));
+    }
+    sim.setValue("popsizes", popsizes);
+
+    // Create subpopulations at the scaled Ne.
+    // popscale = 1 in production runs (Ne used directly); smaller for tests.
+    for (p in 0:(npops - 1)) {
+        sim.addSubpop(p, asInteger(popscale * popsizes[p]));
+    }
+    sim.setValue("deadpops", rep(0, npops));
+
+    // Set migration rates. The Fulvetta convention: ms[m] in row p is the
+    // rate FROM deme m INTO deme p. We set this on the *source* deme
+    // (subpopulations[m]) targeting the *destination* deme (p), per SLiM's
+    // API where setMigrationRates(destination, rate) is called on the source.
+    //
+    // NOTE: in the "without introgression" script, this block is unchanged;
+    // the difference comes later, when warming starts.
+    for (p in 0:(npops - 1)) {
+        ms = asFloat(strsplit(migrations[p], sep="\t"));
+        sim.subpopulations[p].setValue("popmig", ms);
+        for (m in 0:(npops - 1)) {
+            if (m != p) {
+                sim.subpopulations[m].setMigrationRates(sim.subpopulations[p], ms[m]);
+            }
+        }
+    }
+
+    catn("[populus] " + npops + " subpopulations created with Ne = " +
+         paste(popsizes, sep=", "));
+
+    // Initialise tagF on all founding individuals. They carry no mutations
+    // at this point (mutations arise during the simulation), so their
+    // phenotype is the environmental noise component only. This guarantees
+    // tagF is defined when the first fitness callback fires in cycle 1.
+    inds = sim.subpopulations.individuals;
+    inds.tagF = rnorm(size(inds), 0, esd);
+}
+
+// =============================================================================
+//  Generation 1: load the climate trajectory
+// =============================================================================
+
+1 early() {
+    env = readFile(Environment);
+    n_lines = size(env);
+
+    // We expect one row per subpopulation. If the file has a header, skip
+    // it; otherwise read all rows.
+    // Our build_climate_trajectory.py writes no header, but we tolerate one
+    // just in case.
+    first_field = strsplit(env[0], sep="\t")[0];
+    has_header = isNULL(asFloat(first_field));
+    start_row = has_header ? 1 else 0;
+
+    for (i in 0:(npops - 1)) {
+        traj = asFloat(strsplit(env[i + start_row], sep="\t"));
+        sim.setValue(paste0(i, ".env"), traj);
+    }
+
+    // Length of the trajectory determines how long we run.
+    n_gens = size(sim.getValue("0.env"));
+    defineConstant("max_gen", n_gens);
+    catn("[populus] climate trajectory loaded; running " + n_gens + " generations");
+
+    // -------------------------------------------------------------------------
+    //  Sanity check: trajectory units
+    // -------------------------------------------------------------------------
+    //
+    //  The SLiM model assumes the trajectory is in DEVIATION units (each
+    //  lineage centred on its present-day baseline, so values start near 0
+    //  and rise during warming). If someone accidentally feeds an
+    //  absolute-units trajectory (raw temperatures, ~19 degC for pdav-N),
+    //  the founders' phenotype z~0 would sit very far from theta and
+    //  fitness would collapse to fitcushion across the whole run -- a
+    //  bug that's silent unless we catch it here.
+    //
+    //  We check that the first generation's value for every lineage is
+    //  below units_check_threshold (default 5.0). For real Populus
+    //  baselines (~16-19 degC) and warming amplitudes (~6 degC over 80
+    //  years), legitimate deviation values during burn-in will be ~0 and
+    //  during warming will reach ~6 -- both well below 5 for the early
+    //  ticks where this check runs. Absolute-units values would be ~16-19
+    //  for the first tick and trigger the warning.
+    for (i in 0:(npops - 1)) {
+        first_val = sim.getValue(paste0(i, ".env"))[0];
+        if (abs(first_val) > units_check_threshold) {
+            catn("[populus] WARNING: trajectory row " + i + " starts at " + first_val +
+                 " (magnitude > " + units_check_threshold + "). This looks like " +
+                 "ABSOLUTE units, but the model expects DEVIATION units. Did you " +
+                 "build the trajectory file with --units deviation? Continuing " +
+                 "anyway, but fitness will likely collapse to fitcushion.");
+        }
+    }
+}
+
+// =============================================================================
+//  Mutation effect callback
+// =============================================================================
+//
+//  We don't want m2 mutations to act as direct fitness modifiers (SLiM's
+//  default), because we model their effect on fitness via the phenotype
+//  (sum of effects + noise -> Gaussian fitness). Returning 1.0 here means
+//  m2 mutations are neutral to SLiM's built-in fitness machinery; the
+//  fitnessEffect callback we register per-generation handles the phenotype-
+//  based selection instead.
+mutationEffect(m2) { return 1.0; }
+
+// =============================================================================
+//  Safety anchor: gives SLiM a declared end tick
+// =============================================================================
+//
+//  Per the SLiM manual: "SLiM ends a simulation when, at the end of a tick,
+//  there are no script events or callbacks registered for any future tick
+//  (excluding scripts with no declared end tick)."
+//
+//  All of our other event blocks use open-ended tick ranges (1: or 2:),
+//  which DON'T count toward keeping the simulation alive. Without this
+//  anchor, SLiM would terminate cleanly after tick 1. This 10000 late()
+//  block has a specific tick number, so it's a scheduled future event
+//  that keeps SLiM running until either (a) simulationFinished() fires in
+//  the termination block at max_gen + 1, or (b) something goes wrong and
+//  we hit tick 10000 (which stop()s with a clear message).
+10000 late() {
+    stop("[populus] hit safety anchor at tick 10000 without normal termination; max_gen = " + max_gen);
+}
+
+// =============================================================================
+//  Per-generation: register fitness callbacks, set phenotype, log, demog
+// =============================================================================
+//
+//  The SLiM WF tick cycle, per the manual:
+//    0. first() events
+//    1. early() events  <-- we register fitnessEffect callbacks here
+//    2. Generate offspring (weighted by PREVIOUSLY cached fitness)
+//    3. Offspring become parents
+//    4. Fixed-mutation removal
+//    5. late() events  <-- we set tagF, log previous data, adjust pop sizes
+//    6. Fitness recalculation  <-- fitnessEffect callback fires; reads tagF
+//    7. Tick count increment
+//
+//  Key consequences:
+//    - tagF must be set in late() (stage 5), AFTER offspring exist (stage 3)
+//      but BEFORE fitness is recalculated (stage 6).
+//    - cachedFitness() in late() returns fitness from the PREVIOUS tick's
+//      stage 6 -- i.e., the parents who produced the current offspring.
+//      In tick 1 there are no previous parents, so we skip logging there.
+//    - The fitness callback we register in early() will fire in stage 6 of
+//      the same tick, using the optimum theta we passed in.
+
+// In early(): register a per-population fitnessEffect callback using the
+// current generation's optimum theta(t) for each lineage. The callback
+// reads individual.tagF (which late() will set just before stage 6).
+//
+// Each lineage uses its OWN selection width pl_i, so the callback source
+// string is rebuilt per lineage. The fitness normaliser maxfit_i =
+// dnorm(0,0,pl_i) is also lineage-specific, which is essential: a Gaussian
+// with smaller pl has a higher peak, so without per-lineage normalisation
+// the fitness scale would differ systematically across lineages.
+1: early() {
+    if (sim.cycle > max_gen) return;
+    for (i in 0:(npops - 1)) {
+        envVals = sim.getValue(paste0(i, ".env"));
+        theta = envVals[sim.cycle - 1];
+        pl_i = pl_vec[i];
+        maxfit_i = dnorm(0.0, 0.0, pl_i);
+        src = "{ return " + fitcushion + " + dnorm(" + theta +
+              " - individual.tagF, 0.0, " + pl_i + ") / (" + maxfit_i +
+              " / (1 - " + fitcushion + ")); }";
+        sim.registerFitnessEffectCallback(NULL, src, i, sim.cycle, sim.cycle);
+    }
+}
+
+// In late(): set tagF on the current generation. This must run before
+// stage 6 (fitness recalculation), which is when the fitnessEffect
+// callbacks fire and read individual.tagF.
+//
+// Phenotype: z = sum of m2 mutation effects + environmental noise.
+1: late() {
+    inds = sim.subpopulations.individuals;
+    inds.tagF = inds.sumOfMutationsOfType(m2) + rnorm(size(inds), 0, esd);
+}
+
+// =============================================================================
+//  Per-generation: output (runs in early(), where cachedFitness() works)
+// =============================================================================
+//
+//  Per the SLiM manual: "access fitness values [...] in a first() or
+//  early() event." In early() of tick N, the individuals are the offspring
+//  of tick N-1's parents; their fitness was computed in stage 6 of tick
+//  N-1 and is still cached on them. We log that here as "generation N-1
+//  data" (since the fitness reflects how those individuals performed when
+//  selection acted on them). Starts at tick 2 because tick 1 has no prior
+//  stage-6 fitness to log.
+
+2: early() {
+    logged_gen = sim.cycle - 1;
+
+    if (logged_gen == 1) {
+        out_path = wkdir + "/populus_with_introgression_" + run + ".tsv";
+        writeFile(out_path,
+            "replicate\tgeneration\tlineage\tn_individuals\tmean_fitness\tmean_phenotype\tsd_phenotype\tmean_optimum",
+            append=F);
+    }
+
+    out_path = wkdir + "/populus_with_introgression_" + run + ".tsv";
+    lineage_names = c("pdav-N", "mixed", "rot");
+
+    for (i in 0:(size(sim.subpopulations) - 1)) {
+        pop = sim.subpopulations[i];
+        envVals = sim.getValue(paste0(i, ".env"));
+        theta = envVals[logged_gen - 1];
+        row = paste(
+            run, logged_gen, lineage_names[i], pop.individualCount,
+            mean(pop.cachedFitness(NULL)),
+            mean(pop.individuals.tagF),
+            sd(pop.individuals.tagF),
+            theta,
+            sep="\t"
+        );
+        writeFile(out_path, row, append=T);
+    }
+}
+
+// =============================================================================
+//  Per-generation: extinction check and population-size adjustment
+// =============================================================================
+//
+//  After warming begins, populations whose mean fitness fell below
+//  extinctionLimit are flagged extinct. This also runs in early() so we
+//  can legally access cachedFitness().
+
+2: early() {
+    if (sim.cycle < warming_start) return;  // skip during burn-in
+
+    subpops = sim.subpopulations;
+    popsizes = sim.getValue("popsizes");
+    deadpops = sim.getValue("deadpops");
+
+    for (i in 0:(size(subpops) - 1)) {
+        pop = subpops[i];
+        if (deadpops[i] == 1) next;
+        meanFitness = mean(pop.cachedFitness(NULL));
+        newSize = asInteger(popscale * popsizes[i] * meanFitness);
+        if (meanFitness < extinctionLimit) {
+            deadpops[i] = 1;
+            sim.setValue("deadpops", deadpops);
+            catn("# gen " + sim.cycle + ": deme " + i + " extinct");
+            newSize = 10;
+        }
+        pop.setSubpopulationSize(newSize);
+    }
+
+    if (sum(deadpops) == size(subpops)) {
+        catn("# gen " + sim.cycle + ": ALL demes extinct; terminating");
+        sim.simulationFinished();
+    }
+}
+
+// =============================================================================
+//  Termination: log final state and end the simulation
+// =============================================================================
+//
+//  We run one extra tick past max_gen so the final generation's fitness
+//  (cached in stage 6 of tick max_gen) can be logged in early() of tick
+//  max_gen + 1.
+
+2: early() {
+    if (sim.cycle == max_gen + 1) {
+        out_path = wkdir + "/populus_with_introgression_" + run + "_summary.tsv";
+        if (!fileExists(out_path)) {
+            writeFile(out_path,
+                "replicate\tlineage\tfitness_end\tphenotype_end\toptimum_end\tfitness_lag",
+                append=F);
+        }
+        lineage_names = c("pdav-N", "mixed", "rot");
+        for (i in 0:(size(sim.subpopulations) - 1)) {
+            pop = sim.subpopulations[i];
+            envVals = sim.getValue(paste0(i, ".env"));
+            theta = envVals[max_gen - 1];
+            mean_phen = mean(pop.individuals.tagF);
+            row = paste(
+                run, lineage_names[i],
+                mean(pop.cachedFitness(NULL)),
+                mean_phen, theta, theta - mean_phen,
+                sep="\t"
+            );
+            writeFile(out_path, row, append=T);
+        }
+        catn("[populus] complete: " + max_gen + " generations, output in " + wkdir);
+        sim.simulationFinished();
+    }
+}
