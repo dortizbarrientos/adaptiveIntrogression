@@ -153,7 +153,7 @@ def aggregate(root: Path):
 
 def main():
     ap = argparse.ArgumentParser(description="Aggregate pl_sensitivity sweep into a tidy frame.")
-    ap.add_argument("--root", default="04_futureClimate/output/pl_sensitivity")
+    ap.add_argument("--root", default="output/pl_sensitivity")
     ap.add_argument("--out", default="pl_sensitivity_tidy.csv")
     args = ap.parse_args()
 

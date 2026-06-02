@@ -97,9 +97,9 @@ def read_one_rep(rep_dir: Path, cell_params: dict, rep_params: dict) -> list[dic
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sweep-dir", type=Path,
-                    default=Path("04_futureClimate/output/pl_sensitivity"))
+                    default=Path("output/pl_sensitivity"))
     ap.add_argument("--out", type=Path,
-                    default=Path("04_futureClimate/output/pl_sensitivity/pl_sweep_results.csv"))
+                    default=Path("output/pl_sensitivity/pl_sweep_results.csv"))
     ap.add_argument("--partial", action="store_true")
     args = ap.parse_args()
 

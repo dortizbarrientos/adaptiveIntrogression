@@ -284,7 +284,7 @@ def main():
     ap = argparse.ArgumentParser(
         description="Verify completeness/integrity of the pl_sensitivity sweep (TSV/DONE layout).")
     ap.add_argument("--root", type=str,
-                    default="04_futureClimate/output/pl_sensitivity")
+                    default="output/pl_sensitivity")
     ap.add_argument("--sample", type=int, default=2,
                     help="Trajectories per (pl,mig,script) stratum to open in Pass 2. 0 = all. Default 2.")
     args = ap.parse_args()

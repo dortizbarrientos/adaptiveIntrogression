@@ -14,7 +14,7 @@ the strength of stabilising selection?
 The grid: 3 x 3 = 9 cells
 -------------------------
 - pl_mult in {0.5, 1.0, 2.0}    -- multiplier on the empirical pl_vec
-- migration m in {1e-6, 1e-5, 1e-4}   -- migration rate
+- mig_mult in {0.1, 1.0, 10.0}   -- multiplier on the inferred (Table S2) migration matrix
 
 Other parameters fixed at "headline" values:
   mutEffect = 0.05
@@ -27,16 +27,16 @@ Estimated wall-time on M4 Pro at 10-way parallel: ~90 minutes.
 
 Output: a 3x3 grid of buffering measures (extinction rates, fitness lag)
 that can be plotted directly as a heatmap. The empirical Populus point
-sits at (pl_mult=1.0, m=1e-5), in the centre of the grid.
+sits at (pl_mult=1.0, mig_mult=1.0), in the centre of the grid.
 
 Resumability and parallelism follow the same conventions as
 run_pilot_sweep.py: DONE markers, ProcessPoolExecutor, per-run logs.
 
 Usage
 -----
-python 04_futureClimate/run_pl_sensitivity_sweep.py              # full sweep
-python 04_futureClimate/run_pl_sensitivity_sweep.py --dry-run    # plan only
-python 04_futureClimate/run_pl_sensitivity_sweep.py --parallel 8 # adjust
+python sweep/run_pl_sensitivity_sweep.py              # full sweep
+python sweep/run_pl_sensitivity_sweep.py --dry-run    # plan only
+python sweep/run_pl_sensitivity_sweep.py --parallel 8 # adjust
 """
 
 from __future__ import annotations
@@ -55,7 +55,11 @@ from pathlib import Path
 # ============================================================================
 
 PL_MULT_VALUES = [0.5, 1.0, 2.0]
-MIG_VALUES = [1e-6, 1e-5, 1e-4]
+# Migration axis is now a MULTIPLIER on the empirically inferred matrix
+# (Table S2), not an absolute rate. 1.0 = exactly the fastsimcoal estimate;
+# 0.1 and 10.0 flank it by a decade. The question the axis answers becomes
+# "how does buffering depend on migration RELATIVE to the inferred rate?"
+MIG_MULT_VALUES = [0.1, 1.0, 10.0]
 
 # Fixed at headline values (the central cell of the M2 sweep)
 MUT_EFFECT_FIXED = 0.05
@@ -71,17 +75,18 @@ BASE_SEED = 22222222222222
 
 TIMEOUT_SECONDS = 1800
 
-# Base Ne values per lineage (matches the standard mig.txt and the M2 sweep)
-NE_BASE = (50000, 30000, 20000)
+# Base Ne values per lineage, from Table S2 (fastsimcoal2): NPOP1/2/3 =
+# P. davidiana-N, P. davidiana-S, P. rotundifolia respectively.
+NE_BASE = (56592, 26166, 20455)
 
 # ============================================================================
 # Paths
 # ============================================================================
 
-ENV_DATA_DIR = "04_futureClimate/data_real"
-SCRIPT_WITH = "04_futureClimate/populus_with_introgression.slim"
-SCRIPT_WITHOUT = "04_futureClimate/populus_without_introgression.slim"
-TRAJECTORY_BUILDER = "04_futureClimate/build_climate_trajectory.py"
+ENV_DATA_DIR = "data1"
+SCRIPT_WITH = "model/populus_with_introgression.slim"
+SCRIPT_WITHOUT = "model/populus_without_introgression.slim"
+TRAJECTORY_BUILDER = "trajectory/build_climate_trajectory.py"
 
 
 @dataclass
@@ -108,23 +113,48 @@ class RunSpec:
 # File generators
 # ============================================================================
 
-def make_mig_file(mig_main: float, ne_scale: float, out_path: Path) -> None:
-    """
-    Generate cell-specific mig.txt; identical convention to the main sweep.
+# Empirical per-generation migration matrix from Table S2 (fastsimcoal2),
+# in lineage order [dav-N=0, dav-S=1, rot=2].
+#
+# ORIENTATION (verified against the SLiM code, NOT its comment):
+# the model installs entry [row p][col m] as flow p -> m, i.e.
+#   rows    = SOURCE deme
+#   columns = DESTINATION deme
+# So MIG_EMPIRICAL[p][m] is the per-generation rate FROM p INTO m.
+#
+# Table S2 directional rates:
+#   MIG21 dav-S -> dav-N = 5.93e-5   (the bridge feeding the recipient)
+#   MIG12 dav-N -> dav-S = 5.78e-5
+#   MIG32 rot   -> dav-S = 5.90e-5
+#   MIG23 dav-S -> rot   = 5.63e-5
+# Direct dav-N <-> rot is zero: the relay routes through dav-S.
+MIG_EMPIRICAL = [
+    #   ->davN       ->davS       ->rot
+    [   0.0,         5.78e-5,     0.0      ],   # davN ->   (MIG12 into davS)
+    [   5.93e-5,     0.0,         5.63e-5  ],   # davS ->   (MIG21 into davN; MIG23 into rot)
+    [   0.0,         5.90e-5,     0.0      ],   # rot  ->   (MIG32 into davS)
+]
 
-    Fields are tab-separated, matching the convention the SLiM script
-    expects (strsplit with sep="\t"). Space-separation looks identical
-    in `cat` output but causes the parser to read only the first column,
-    leading to subscript-out-of-range crashes on row 2 of the matrix.
+
+def make_mig_file(mig_mult: float, ne_scale: float, out_path: Path) -> None:
+    """
+    Generate cell-specific mig.txt: diagonal = scaled Ne, off-diagonal =
+    empirical directional migration (Table S2) x mig_mult.
+
+    Fields are TAB-separated. Space-separation looks identical in `cat`
+    output but causes the SLiM parser (strsplit sep="\t") to read only the
+    first column, crashing on row 2. Rows are SOURCE, columns DESTINATION,
+    matching the model's actual setMigrationRates orientation.
     """
     ne = [int(round(n * ne_scale)) for n in NE_BASE]
-    mig_direct = mig_main / 10
-    lines = [
-        f"{ne[0]}\t{mig_main:g}\t{mig_direct:g}",
-        f"{mig_main:g}\t{ne[1]}\t{mig_main:g}",
-        f"{mig_direct:g}\t{mig_main:g}\t{ne[2]}",
-    ]
-    out_path.write_text("\n".join(lines) + "\n")
+    rows = []
+    for p in range(3):
+        cells = [
+            f"{ne[p]}" if p == m else f"{MIG_EMPIRICAL[p][m] * mig_mult:g}"
+            for m in range(3)
+        ]
+        rows.append("\t".join(cells))
+    out_path.write_text("\n".join(rows) + "\n")
 
 
 def ensure_trajectory(gen_time: int, sweep_dir: Path) -> Path:
@@ -212,8 +242,8 @@ def run_one(spec_dict: dict) -> dict:
 # Job-list builder
 # ============================================================================
 
-def cell_label(pl_mult: float, mig: float) -> str:
-    return f"pl-{pl_mult:g}__mig-{mig:g}"
+def cell_label(pl_mult: float, mig_mult: float) -> str:
+    return f"pl-{pl_mult:g}__mig-{mig_mult:g}"
 
 
 def build_specs(sweep_dir: Path) -> tuple[list[RunSpec], Path]:
@@ -221,13 +251,13 @@ def build_specs(sweep_dir: Path) -> tuple[list[RunSpec], Path]:
     specs: list[RunSpec] = []
     cell_idx = 0
     for pl_mult in PL_MULT_VALUES:
-        for mig in MIG_VALUES:
-            label = cell_label(pl_mult, mig)
+        for mig_mult in MIG_MULT_VALUES:
+            label = cell_label(pl_mult, mig_mult)
             cell_dir = sweep_dir / label
             cell_dir.mkdir(parents=True, exist_ok=True)
 
             mig_file = cell_dir / "mig.txt"
-            make_mig_file(mig, NE_SCALE_FIXED, mig_file)
+            make_mig_file(mig_mult, NE_SCALE_FIXED, mig_file)
 
             for rep in range(1, N_REPS + 1):
                 seed = BASE_SEED + cell_idx * 1000 + rep
@@ -240,7 +270,7 @@ def build_specs(sweep_dir: Path) -> tuple[list[RunSpec], Path]:
                         cell_dir=cell_dir, rep_dir=rep_dir,
                         script_path=script_path, script_name=script_name,
                         mig_file=mig_file, env_file=env_file,
-                        mig=mig, pl_mult=pl_mult, rep=rep, seed=seed,
+                        mig=mig_mult, pl_mult=pl_mult, rep=rep, seed=seed,
                     ))
             cell_idx += 1
     return specs, env_file
@@ -270,7 +300,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sweep-dir", type=Path,
-                    default=Path("04_futureClimate/output/pl_sensitivity"),
+                    default=Path("output/pl_sensitivity"),
                     help="Output directory")
     ap.add_argument("--parallel", type=int, default=10,
                     help="Concurrent SLiM processes (default: 10 for M4 Pro)")
@@ -280,7 +310,7 @@ def main():
     for p in [SCRIPT_WITH, SCRIPT_WITHOUT, TRAJECTORY_BUILDER, ENV_DATA_DIR]:
         if not Path(p).exists():
             sys.exit(f"ERROR: required input not found: {p}\n"
-                     f"Run from the repo root (~/adaptiveIntrogression).")
+                     f"Run from the repo root (~/adaptiveIntrogression_clean).")
 
     args.sweep_dir.mkdir(parents=True, exist_ok=True)
 
@@ -291,7 +321,7 @@ def main():
     remaining = total - already_done
 
     config = {
-        "axes": {"pl_mult_values": PL_MULT_VALUES, "mig_values": MIG_VALUES},
+        "axes": {"pl_mult_values": PL_MULT_VALUES, "mig_mult_values": MIG_MULT_VALUES},
         "fixed": {
             "mutEffect": MUT_EFFECT_FIXED,
             "C": C_FIXED,

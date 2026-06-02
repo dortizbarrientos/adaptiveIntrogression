@@ -175,6 +175,13 @@ initialize() {
     migrations = readFile(migMatrix);
     defineConstant("npops", size(migrations));
 
+    // Dimension guard: this Populus model is the three-lineage system.
+    // A malformed mig.txt (wrong row count) would fail later in confusing
+    // ways; catch it here with a clear message.
+    if (npops != 3)
+        stop("[populus] mig.txt has " + npops + " rows; expected 3 " +
+             "(dav-N, dav-S, rot). Check the migration matrix file.");
+
     // Diagonal entries are Ne; off-diagonal are migration rates.
     popsizes = NULL;
     for (p in 0:(npops - 1)) {
@@ -190,10 +197,15 @@ initialize() {
     }
     sim.setValue("deadpops", rep(0, npops));
 
-    // Set migration rates. The Fulvetta convention: ms[m] in row p is the
-    // rate FROM deme m INTO deme p. We set this on the *source* deme
-    // (subpopulations[m]) targeting the *destination* deme (p), per SLiM's
-    // API where setMigrationRates(destination, rate) is called on the source.
+    // Set migration rates. Matrix orientation: ms[m] in row p is the rate
+    // FROM deme p INTO deme m (rows = SOURCE, columns = DESTINATION).
+    // The loop below calls
+    //     subpopulations[m].setMigrationRates(subpopulations[p], ms[m])
+    // and SLiM's setMigrationRates(sourceSubpop, rate) sets the fraction of
+    // the CALLING deme's incoming migrants that arrive FROM sourceSubpop.
+    // Here the caller is m and the source is p, so this installs flow p -> m
+    // with rate ms[m] = matrix[row p][col m]. Build mig.txt with rows as the
+    // source deme accordingly (see make_mig_file in run_pl_sensitivity_sweep.py).
     //
     // NOTE: in the "without introgression" script, this block is unchanged;
     // the difference comes later, when warming starts.
